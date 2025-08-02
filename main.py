@@ -6,11 +6,16 @@ from pydantic import BaseModel
 from typing import Optional, List
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-
+from model import get_meal_recommendations
+import model
+import re
+# Load environment variables
 load_dotenv()
 
+# FastAPI app initialization
 app = FastAPI()
 
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,12 +24,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Load Google API keys for image search
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 SEARCH_ENGINE_ID = os.getenv("SEARCH_ENGINE_ID")
 
 if not GOOGLE_API_KEY or not SEARCH_ENGINE_ID:
     print("⚠️ WARNING: GOOGLE_API_KEY or SEARCH_ENGINE_ID is missing from your .env file")
 
+# ---------------------- Utility Functions ----------------------
 
 async def fetch_google_image_url(query: str, client: httpx.AsyncClient) -> str:
     """
@@ -52,6 +59,8 @@ async def fetch_google_image_url(query: str, client: httpx.AsyncClient) -> str:
         print(f"[ERROR] Failed image fetch for '{query}': {e}")
     
     return "/generate_image/placeholder.png"
+
+# ---------------------- Mock Procedures ----------------------
 
 mock_procedures = {
     1: [
@@ -84,58 +93,85 @@ mock_procedures = {
     ]
 }
 
+# ---------------------- Request & Response Models ----------------------
+
 class RecipeRequest(BaseModel):
     height: float
     weight: float
     requiredIngredient: str
     allergicIngredient: Optional[str] = None
+    mealType: str = "Lunch"
+    weightGoal: str = "Maintain"
     estimatedTime: int
     numResults: int
 
 class ProcedureResponse(BaseModel):
     steps: List[str]
 
+# ---------------------- Routes ----------------------
 
 @app.get("/")
 async def root():
     return {"message": "NutriGenius Backend is running!"}
 
+
 @app.post("/recommend")
 async def recommend(data: RecipeRequest):
-    base_recipes = [
-        {
-            "id": 1,
-            "title": "Paneer Butter Masala",
-            "description": "A creamy North Indian Curry made with paneer, butter and rich tomato gravy",
-            "ingredients": ["Paneer", "Butter", "Masala", "Green Peas", "Curry Leaves", "Coriander"]
-        },
-        {
-            "id": 2,
-            "title": "Veg Pulao",
-            "description": "Fragrant basmati rice cooked with seasonal vegetables and aromatic spices.",
-            "ingredients": ["Rice", "Carrot", "Peas", "Beans", "Ghee", "Spices"]
-        },
-        {
-            "id": 3,
-            "title": "Masala Dosa",
-            "description": "South Indian delicacy with crispy dosa and spiced potato filling.",
-            "ingredients": ["Rice Batter", "Potato", "Onion", "Curry Leaves", "Mustard Seeds", "Chutney"]
-        }
-    ]
+    """
+    Recommend meals based on user data using the ML model.
+    """
 
+    # 1️⃣ Get recommendations from the model
+    recommendations_df = get_meal_recommendations(
+        height_cm=data.height,
+        weight_kg=data.weight,
+        meal_type=data.mealType,
+        weight_goal=data.weightGoal,
+        desired_ingredients=data.requiredIngredient,
+        user_allergies=data.allergicIngredient or "none"
+    )
+    
+    # 2️⃣ Convert DataFrame → list of dicts
+    recipes = []
+    for idx, row in recommendations_df.iterrows():
+        ingredients_list = [i.strip() for i in row['Ingredients'].split(',')]
+        recipes.append({
+            "id": idx + 1,
+            "title": row['Recipe_Name'],
+            "description": f"A delicious {data.mealType} option",
+            "ingredients": ingredients_list,
+        })
+
+    # 3️⃣ Fetch images for each recipe
     async with httpx.AsyncClient() as client:
-        image_tasks = [fetch_google_image_url(recipe["title"], client) for recipe in base_recipes]
+        image_tasks = [fetch_google_image_url(recipe["title"], client) for recipe in recipes]
         fetched_urls = await asyncio.gather(*image_tasks)
 
-    final_recipes = []
-    for recipe, url in zip(base_recipes, fetched_urls):
-        final_recipes.append({**recipe, "image": url})
+    # 4️⃣ Attach images to recipes
+    for recipe, url in zip(recipes, fetched_urls):
+        recipe["image"] = url
 
-    return {"recipes": final_recipes}
+    # 5️⃣ Return recipes with images
+    return {"recipes": recipes}
+
 
 @app.get("/procedure/{recipe_id}", response_model=ProcedureResponse)
 async def get_procedure(recipe_id: int):
-    procedure = mock_procedures.get(recipe_id)
-    if not procedure:
-        raise HTTPException(status_code=404, detail="Recipe procedure not found.")
-    return {"steps": procedure}
+    """
+    Return step-by-step procedure for a recipe from the dataset.
+    """
+    try:
+        # Use the recipe_id as DataFrame index
+        recipe_row = model.df.iloc[recipe_id]
+        instructions = recipe_row.get("TranslatedInstructions", "")
+
+        if not isinstance(instructions, str) or not instructions.strip():
+            raise HTTPException(status_code=404, detail="No procedure found for this recipe")
+
+        # Split instructions into step-by-step list
+        steps = [step.strip() for step in re.split(r'[.\n]', instructions) if step.strip()]
+
+        return {"steps": steps}
+
+    except IndexError:
+        raise HTTPException(status_code=404, detail="Recipe ID not found")

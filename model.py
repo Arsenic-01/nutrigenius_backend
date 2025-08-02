@@ -17,8 +17,8 @@ try:
 except Exception as e:
     print(f"Error loading or processing the dataset: {e}")
     # Fallback dummy data if URL fails
-    data = {'TranslatedRecipeName': ['Egg Toast', 'Chicken Salad', 'Fish Curry'],
-            'Cleaned_Ingredients': ['eggs, bread, butter', 'chicken, rice, broccoli', 'salmon, quinoa, asparagus'],
+    data = {'TranslatedRecipeName': ['Butter Toast', 'Paneer Salad', 'Veg Curry'],
+            'Cleaned_Ingredients': ['bread, butter', 'Paneer, Cabage, rice, broccoli', 'Cauliflower, Potato, asparagus'],
             'TotalTimeInMins': [10, 25, 30]}
     df = pd.DataFrame(data)
 
