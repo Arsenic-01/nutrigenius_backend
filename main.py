@@ -26,8 +26,29 @@ async def root():
 
 @app.post("/recommend")
 async def recommend(data: RecipeRequest):
-    print("Received data: ", data.dict())
+    print("Received data: ", data.model_dump())
+    
+    dummy_recipes = [
+        {
+            "title": "Paneer Butter Masala",
+            "description": "A creamy North Indian Curry made with paneer, butter andf rich tomato gravy",
+            "image": "/recipes/PaneerButterMasala.jpeg",
+            "ingredients": ["Paneer", "Butter", "Masala", "Green Peas", "Curry Leaves", "Coriander"]
+        },
+        {
+            "title": "Veg Pulao",
+            "description": "Fragrant basmati rice cooked with seasonal vegetables and aromatic spices.",
+            "image": "/recipes/VegPulaoo.jpg",
+            "ingredients": ["Rice", "Carrot", "Peas", "Beans", "Ghee", "Spices"]
+        },
+        {
+            "title": "Masala Dosa",
+            "description": "South Indian delicacy with crispy dosa and spiced potato filling.",
+            "image": "/recipes/MasalaDosa.jpg",
+            "ingredients": ["Rice Batter", "Potato", "Onion", "Curry Leaves", "Mustard Seeds", "Chutney"]
+        }
+    ]
+    
     return{
-        "message": "Data received successfully!",
-        "received_data": data.dict()
+        "recipes": dummy_recipes
     }
