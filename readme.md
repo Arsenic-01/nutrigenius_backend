@@ -23,7 +23,7 @@ Follow these steps to set up and run the server:
 4. **Install the required dependencies:**
 
    ```
-   pip install fastapi uvicorn pydantic httpx pandas scikit-learn numpy
+   pip install fastapi uvicorn pydantic httpx pandas scikit-learn numpy ddgs
    ```
 
 5. **Start the FastAPI server:**

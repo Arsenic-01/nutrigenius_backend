@@ -3,188 +3,193 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import re
+import sys
 
 # --- 1. Data Loading and Initial Preparation ---
 
-# Load the dataset from the provided Google Sheet URL
-google_sheet_url = 'https://docs.google.com/spreadsheets/d/1P0q4lSw-_wSckjWyCyFBvgcKakaeP8OAyaPhGZFoxMU/export?format=csv'
+local_dataset = 'NutriGeniusDataset.csv'
+
 try:
-    df = pd.read_csv(google_sheet_url)
-    # Clean up column names to remove leading/trailing spaces and special characters
-    df.columns = df.columns.str.strip().str.replace('-', '_')
-    print("Columns loaded and cleaned:", df.columns.to_list())
+    df = pd.read_csv(local_dataset)
+    if df.empty:
+        raise ValueError("The loaded DataFrame is empty. Check the Google Sheet URL or its content.")
+
+    # Clean column names before using them
+    df.columns = df.columns.str.strip()
+
+    # Define required columns for the script to function
+    required_cols = ['RecipeName', 'Ingredients', 'TotalTimeInMins', 'Course', 'Diet']
+    
+    # Check if all required columns exist
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise KeyError(f"The following required columns are missing from the dataset: {missing_cols}")
+
+    # Drop rows where key columns are missing
+    df.dropna(subset=required_cols, inplace=True)
+    print("Dataset loaded and validated successfully.")
+    print("Columns:", df.columns.to_list())
 
 except Exception as e:
-    print(f"Error loading or processing the dataset: {e}")
-    # Fallback dummy data if URL fails
-    data = {'TranslatedRecipeName': ['Butter Toast', 'Paneer Salad', 'Veg Curry'],
-            'Cleaned_Ingredients': ['bread, butter', 'Paneer, Cabage, rice, broccoli', 'Cauliflower, Potato, asparagus'],
-            'TotalTimeInMins': [10, 25, 30]}
-    df = pd.DataFrame(data)
-
+    print(f"\nFATAL ERROR loading or processing the dataset: {e}")
+    print("The script will now exit as it cannot proceed without valid data.")
+    sys.exit() # Exit the script if data loading fails
 
 # --- 2. Feature Engineering & Preprocessing ---
 
-# Function to derive Meal_Type from recipe name (since the column is missing)
-def get_meal_type(recipe_name):
-    if not isinstance(recipe_name, str):
+# Function to clean the new, more complex 'Ingredients' column
+def clean_ingredients(text):
+    if not isinstance(text, str):
+        return ""
+    # Remove text in parentheses
+    text = re.sub(r'\([^)]*\)', '', text)
+    # Remove quantities and units (e.g., "6", "to taste", "1 tablespoon")
+    text = re.sub(r'[\d\./]+(\s*(tablespoon|teaspoon|cup|grams|kg|ml)\w*)?', '', text)
+    # Remove common instruction words
+    text = text.replace('- deseeded', '').replace('- thinly sliced', '').replace('- to taste', '')
+    # Split by comma, strip whitespace, and join back
+    ingredients = [item.strip() for item in text.split(',') if item.strip()]
+    return ', '.join(ingredients)
+
+# ENHANCED: Function to map 'Course' to a simpler 'Meal_Type'
+def get_meal_type(course):
+    if not isinstance(course, str):
         return 'Unknown'
-    name = recipe_name.lower()
-    if any(keyword in name for keyword in ['egg', 'oat', 'pancake', 'smoothie', 'breakfast']):
+    course = course.lower()
+    if any(keyword in course for keyword in ['breakfast', 'pancakes', 'smoothie']):
         return 'Breakfast'
-    if any(keyword in name for keyword in ['sandwich', 'salad', 'wrap', 'lunch']):
-        return 'Lunch'
-    if any(keyword in name for keyword in ['dinner', 'curry', 'roast', 'steak', 'karela']):
-        return 'Dinner'
-    return 'Lunch' # Default to Lunch if no keywords match
+    if any(keyword in course for keyword in ['snack', 'appetizer', 'starter']):
+        return 'Snack'
+    if any(keyword in course for keyword in ['dessert', 'cakes', 'sweets']):
+        return 'Dessert'
+    # Default most main/side dishes to Lunch/Dinner
+    if any(keyword in course for keyword in ['main course', 'side dish', 'lunch', 'dinner', 'biryani', 'pulao', 'dal', 'sabzi', 'curries', 'one pot dish', 'salad', 'soup']):
+        return 'Dinner' # Treat Lunch and Dinner as the same category for broader results
+    return 'Dinner' # Default
 
-# Function to preprocess the text data
-def preprocess_text(text):
-    if isinstance(text, str):
-        # Cleans text by removing parentheses and replacing commas with spaces
-        return text.lower().replace(',', ' ').replace('(', ' ').replace(')', ' ')
-    return ''
+df['Cleaned_Ingredients'] = df['Ingredients'].apply(clean_ingredients)
+df['Meal_Type'] = df['Course'].apply(get_meal_type)
 
-# Use a try-except block to handle potential KeyErrors gracefully
-try:
-    # --- IMPROVEMENT: Use the 'Cleaned_Ingredients' column for better accuracy ---
-    RECIPE_NAME_COL = 'TranslatedRecipeName'
-    INGREDIENTS_COL = 'Cleaned_Ingredients'
-    
-    # Create the 'Meal_Type' column
-    df['Meal_Type'] = df[RECIPE_NAME_COL].apply(get_meal_type)
+# Vectorizer for finding ingredient similarity
+vectorizer = TfidfVectorizer(stop_words='english')
+# We create a combined feature for TF-IDF to learn from, including diet and course for context
+df['Combined_Features'] = df['Cleaned_Ingredients'] + ' ' + df['Diet'] + ' ' + df['Course']
+feature_matrix = vectorizer.fit_transform(df['Combined_Features'])
 
-    # Process the ingredients text from the cleaned column
-    df['Processed_Ingredients'] = df[INGREDIENTS_COL].apply(preprocess_text)
-
-    # Combine ingredients and meal type for the main feature set
-    df['Combined_Features'] = df['Processed_Ingredients'] + ' ' + df['Meal_Type'].str.lower()
-
-    # Use a single vectorizer for both ingredients and allergies
-    vectorizer = TfidfVectorizer(stop_words='english')
-
-    # Fit and transform the features
-    feature_matrix = vectorizer.fit_transform(df['Combined_Features'])
-
-except KeyError as e:
-    print(f"\n---FATAL ERROR---")
-    print(f"A required column '{e}' was not found in the dataset.")
-    print(f"Please check the 'Columns loaded and cleaned' printout above and ensure the column names in the code match the file exactly.")
-    exit()
+print("\nPreprocessing complete. Enhanced 'Meal_Type' mapping applied.")
 
 
 # --- 3. The Recommendation Function ---
 
-def get_meal_recommendations(height_cm, weight_kg, meal_type, weight_goal, desired_ingredients, user_allergies, num_recommendations=5):
+def get_meal_recommendations(height_cm, weight_kg, meal_type, weight_goal, desired_ingredients, user_allergies, max_cooking_time=None, diet_preference=None, num_results=10):
     """
-    Generates randomized meal recommendations based on user inputs.
+    Generates meal recommendations using the new dataset structure and enhanced logic.
     """
-    print("--- Starting Recommendation Process ---")
+    print("\n--- Starting Recommendation Process ---")
     
-    # --- Create a Feature Vector for the User's Query ---
-    height_m = height_cm / 100
-    bmi = weight_kg / (height_m ** 2)
-    print(f"User BMI calculated: {bmi:.2f} (Goal: {weight_goal})")
+    # --- Stage 1: Initial Candidate Filtering ---
+    if meal_type.lower() in ['lunch', 'dinner']:
+        meal_mask = df['Meal_Type'].isin(['Dinner'])
+    else:
+        meal_mask = (df['Meal_Type'].str.lower() == meal_type.lower())
 
-    processed_desired_ingredients = preprocess_text(desired_ingredients)
-    user_query_text = f"{processed_desired_ingredients} {meal_type.lower()}"
-    user_vector = vectorizer.transform([user_query_text])
+    # Start with a base set of candidates after meal type filtering
+    base_candidate_df = df[meal_mask].copy()
 
-    # --- Calculate Similarity ---
-    ingredient_similarity = cosine_similarity(user_vector, feature_matrix)
+    # Filter by allergies
+    if user_allergies and user_allergies.lower() != 'none':
+        allergens = [a.strip() for a in user_allergies.lower().split(',')]
+        allergy_mask = base_candidate_df['Cleaned_Ingredients'].apply(
+            lambda x: not any(allergen in x.lower() for allergen in allergens)
+        )
+        base_candidate_df = base_candidate_df[allergy_mask]
 
-    # --- Handle Allergies ---
-    allergy_penalty = np.zeros(len(df))
-    processed_user_allergies = preprocess_text(user_allergies)
-    if processed_user_allergies.strip():
-        for i, ingredients in enumerate(df['Processed_Ingredients']):
-            if any(f' {allergen} ' in f' {ingredients} ' for allergen in processed_user_allergies.split()):
-                allergy_penalty[i] = 100  # Heavy penalty
+    # Filter by cooking time
+    if max_cooking_time is not None:
+        base_candidate_df = base_candidate_df[base_candidate_df['TotalTimeInMins'] <= max_cooking_time]
 
-    # --- Combine Scores ---
-    meal_type_mask = (df['Meal_Type'].str.lower() == meal_type.lower())
-    final_scores = ingredient_similarity.flatten() - allergy_penalty
-    final_scores[~meal_type_mask] = -np.inf
+    # --- UPDATED: Strict Ingredient Filtering with Fallback ---
+    candidate_df = base_candidate_df 
 
-    # Filter valid recipes for this meal type
-    valid_indices = np.where(meal_type_mask)[0]
-    if len(valid_indices) == 0:
-        print(f"No recipes found for the meal type: {meal_type}")
+    if desired_ingredients and desired_ingredients.lower().strip() != 'none':
+        must_have_ingredients = [ing.strip() for ing in desired_ingredients.lower().split(',') if ing.strip()]
+        
+        # Create a mask that checks if all must-have ingredients are in the recipe's ingredient list
+        strict_mask = base_candidate_df['Cleaned_Ingredients'].apply(
+            lambda x: all(ing in x.lower() for ing in must_have_ingredients)
+        )
+        strict_filtered_df = base_candidate_df[strict_mask]
+
+        # If strict filtering yields results, use them. Otherwise, fall back to relaxed search.
+        if not strict_filtered_df.empty:
+            candidate_df = strict_filtered_df.copy() # Use a copy to avoid warnings
+        else:
+            print("[!] No recipes found with ALL desired ingredients. Relaxing search to find recipes with ANY of the ingredients.")
+            relaxed_mask = base_candidate_df['Cleaned_Ingredients'].apply(
+                lambda x: any(ing in x.lower() for ing in must_have_ingredients)
+            )
+            candidate_df = base_candidate_df[relaxed_mask].copy() # Use a copy to avoid warnings
+
+
+    if candidate_df.empty:
+        print("No recipes found after initial filtering. Consider relaxing constraints or desired ingredients.")
+        return pd.DataFrame()
+    print(f"Found {len(candidate_df)} candidates after all filtering.")
+
+    # --- Stage 2: Ranking Candidates ---
+    user_query = f"{desired_ingredients} {diet_preference or ''} {weight_goal}"
+    user_vector = vectorizer.transform([user_query])
+    candidate_matrix = vectorizer.transform(candidate_df['Combined_Features'])
+    
+    # FIX: Assign new columns using .loc to prevent SettingWithCopyWarning
+    candidate_df.loc[:, 'similarity_score'] = cosine_similarity(user_vector, candidate_matrix).flatten()
+
+    # ENHANCED: More advanced ranking score calculation
+    def calculate_ranking_score(row):
+        score = row['similarity_score'] * 1.0
+        diet = row['Diet'].lower()
+
+        # Big bonus for matching a specific diet preference
+        if diet_preference and diet_preference.lower() in diet:
+            score += 0.5
+        
+        # Bonus based on weight goal
+        if weight_goal == 'Lose' and any(d in diet for d in ['diabetic friendly', 'sugar free diet', 'no onion no garlic']):
+            score += 0.2
+        if weight_goal == 'Gain' and any(d in diet for d in ['high protein']):
+            score += 0.2
+        
+        return score
+
+    candidate_df.loc[:, 'ranking_score'] = candidate_df.apply(calculate_ranking_score, axis=1)
+    recommendations = candidate_df.sort_values(by='ranking_score', ascending=False).head(num_results)
+    
+    if recommendations.empty:
+        print("Could not find any suitable recommendations after ranking.")
         return pd.DataFrame()
 
-    # --- Get top N candidates, then randomly select ---
-    top_n = min(50, len(valid_indices))  # consider top 50 for randomness
-    top_indices_in_filtered = np.argsort(final_scores[valid_indices])[-top_n:][::-1]
-    top_candidates = valid_indices[top_indices_in_filtered]
-
-    # Randomly sample final recommendations
-    num_recommendations = min(num_recommendations, len(top_candidates))
-    recommended_indices = np.random.choice(top_candidates, size=num_recommendations, replace=False)
-
-    # Build DataFrame
-    recommendations_df = pd.DataFrame({
-        'Recipe_Name': df.iloc[recommended_indices][RECIPE_NAME_COL],
-        'Similarity_Score': final_scores[recommended_indices],
-        'Derived_Meal_Type': df.iloc[recommended_indices]['Meal_Type'],
-        'Ingredients': df.iloc[recommended_indices][INGREDIENTS_COL]
-    })
-
     print("--- Recommendations Generated ---")
-    return recommendations_df
+    return recommendations
 
-# --- 4. Example Usage (Testing the Model) ---
+# --- 4. Example Usage ---
+# This part is for testing and won't be called by the FastAPI backend
+if __name__ == '__main__':
+    print("\n" + "="*50)
+    print("Example: User wants to Lose weight, looking for a vegetarian Dinner.")
+    print("="*50)
 
-print("\n" + "="*50)
-print("Example 1: Lunch to Lose Weight, wants Chicken, no allergies")
-print("="*50)
-recommendations = get_meal_recommendations(
-    height_cm=175,
-    weight_kg=80,
-    meal_type='Lunch',
-    weight_goal='Lose',
-    desired_ingredients='chicken, salad, olive oil',
-    user_allergies='none'
-)
-print(recommendations)
-print("\n" * 2)
-
-
-print("="*50)
-print("Example 2: Breakfast to Gain Weight, wants Eggs, allergic to nuts")
-print("="*50)
-recommendations = get_meal_recommendations(
-    height_cm=180,
-    weight_kg=70,
-    meal_type='Breakfast',
-    weight_goal='Gain',
-    desired_ingredients='eggs, bacon, toast',
-    user_allergies='nuts, almonds, peanut'
-)
-print(recommendations)
-print("\n" * 2)
-
-print("="*50)
-print("Example 3: Dinner, wants a vegetarian meal, allergic to shellfish")
-print("="*50)
-recommendations = get_meal_recommendations(
-    height_cm=160,
-    weight_kg=60,
-    meal_type='Dinner',
-    weight_goal='Maintain',
-    desired_ingredients='quinoa, beans, vegetables, tomato',
-    user_allergies='shellfish, shrimp, crab'
-)
-print(recommendations)
-
-print("="*50)
-print("Example 3: Dinner, wants a vegetarian meal, allergic to shellfish")
-print("="*50)
-recommendations = get_meal_recommendations(
-    height_cm=160,
-    weight_kg=60,
-    meal_type='Dinner',
-    weight_goal='Maintain',
-    desired_ingredients='Paneer',
-    user_allergies='shellfish, shrimp, crab'
-)
-print(recommendations)
+    recommendations = get_meal_recommendations(
+        height_cm=160,
+        weight_kg=70,
+        meal_type='Dinner',
+        weight_goal='Lose',
+        desired_ingredients='paneer',
+        user_allergies='nuts',
+        diet_preference='Vegetarian'
+    )
+    
+    # FIX: Check if the recommendations DataFrame is empty before printing to prevent crash
+    if not recommendations.empty:
+        print(recommendations[['RecipeName', 'ranking_score', 'Diet', 'Course', 'Cleaned_Ingredients']])
+    else:
+        print("\n--> Final Result: No recommendations found matching the criteria.")
