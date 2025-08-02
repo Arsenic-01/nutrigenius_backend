@@ -75,9 +75,9 @@ except KeyError as e:
 
 # --- 3. The Recommendation Function ---
 
-def get_meal_recommendations(height_cm, weight_kg, meal_type, weight_goal, desired_ingredients, user_allergies):
+def get_meal_recommendations(height_cm, weight_kg, meal_type, weight_goal, desired_ingredients, user_allergies, num_recommendations=5):
     """
-    Generates meal recommendations based on user inputs.
+    Generates randomized meal recommendations based on user inputs.
     """
     print("--- Starting Recommendation Process ---")
     
@@ -97,30 +97,31 @@ def get_meal_recommendations(height_cm, weight_kg, meal_type, weight_goal, desir
     allergy_penalty = np.zeros(len(df))
     processed_user_allergies = preprocess_text(user_allergies)
     if processed_user_allergies.strip():
-        # We check if any of the user's allergy words appear in the recipe's ingredients
         for i, ingredients in enumerate(df['Processed_Ingredients']):
-            # Check for whole word matches to avoid partial matches (e.g., 'rice' in 'price')
             if any(f' {allergen} ' in f' {ingredients} ' for allergen in processed_user_allergies.split()):
-                allergy_penalty[i] = 100 # Apply a heavy penalty
+                allergy_penalty[i] = 100  # Heavy penalty
 
-    # --- Combine Scores and Get Final Recommendations ---
+    # --- Combine Scores ---
     meal_type_mask = (df['Meal_Type'].str.lower() == meal_type.lower())
     final_scores = ingredient_similarity.flatten() - allergy_penalty
     final_scores[~meal_type_mask] = -np.inf
 
-    num_recommendations = 5
+    # Filter valid recipes for this meal type
     valid_indices = np.where(meal_type_mask)[0]
     if len(valid_indices) == 0:
         print(f"No recipes found for the meal type: {meal_type}")
         return pd.DataFrame()
-        
-    num_recommendations = min(num_recommendations, len(valid_indices))
-    
-    # Get indices from the filtered list to ensure we only recommend from the correct meal type
-    top_indices_in_filtered = np.argsort(final_scores[valid_indices])[-num_recommendations:][::-1]
-    recommended_indices = valid_indices[top_indices_in_filtered]
 
-    # Create the output DataFrame using the correct column names
+    # --- Get top N candidates, then randomly select ---
+    top_n = min(50, len(valid_indices))  # consider top 50 for randomness
+    top_indices_in_filtered = np.argsort(final_scores[valid_indices])[-top_n:][::-1]
+    top_candidates = valid_indices[top_indices_in_filtered]
+
+    # Randomly sample final recommendations
+    num_recommendations = min(num_recommendations, len(top_candidates))
+    recommended_indices = np.random.choice(top_candidates, size=num_recommendations, replace=False)
+
+    # Build DataFrame
     recommendations_df = pd.DataFrame({
         'Recipe_Name': df.iloc[recommended_indices][RECIPE_NAME_COL],
         'Similarity_Score': final_scores[recommended_indices],
@@ -130,7 +131,6 @@ def get_meal_recommendations(height_cm, weight_kg, meal_type, weight_goal, desir
 
     print("--- Recommendations Generated ---")
     return recommendations_df
-
 
 # --- 4. Example Usage (Testing the Model) ---
 
