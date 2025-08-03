@@ -38,6 +38,7 @@ class RecipeResponse(BaseModel):
     Diet: Optional[str] = None
     URL: Optional[str] = None
     image: str
+    Servings: Optional[int] = None
     PrepTimeInMins: Optional[int] = None
     CookTimeInMins: Optional[int] = None
     TotalTimeInMins: Optional[int] = None
@@ -47,7 +48,7 @@ class ProcedureResponse(BaseModel):
 
 # ---------- Image Fetch Utility ----------
 async def fetch_duckduckgo_image_url(query: str) -> str:
-    placeholder_url = "https://placehold.co/600x400/EEE/31343C?text=Image+Not+Available"
+    placeholder_url = "/generate_image/placeholder.png"
 
     def is_invalid(url: str) -> bool:
         return "archanaskitchen.com" in url
@@ -87,7 +88,7 @@ async def recommend(data: RecipeRequest):
         user_allergies=data.user_allergies or "none",
         max_cooking_time=data.max_cooking_time,
         diet_preference=data.diet_preference,
-        num_results=10
+        num_results=12
     )
 
     if recommendations_df.empty:
@@ -104,6 +105,7 @@ async def recommend(data: RecipeRequest):
             "Course": row.get("Course"),
             "Diet": row.get("Diet"),
             "URL": row.get("URL"),
+            "Servings": row.get("Servings"),
             "PrepTimeInMins": row.get("PrepTimeInMins"),
             "CookTimeInMins": row.get("CookTimeInMins"),
             "TotalTimeInMins": row.get("TotalTimeInMins")
