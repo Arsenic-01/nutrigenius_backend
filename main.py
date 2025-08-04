@@ -8,17 +8,36 @@ from model import get_meal_recommendations, df as model_df
 import re
 import math
 import pandas as pd
-
-# Use the correct, modern ddgs library
-# Make sure you have run: pip install -U ddgs
 from ddgs import DDGS
+from appwrite.client import Client
+from appwrite.services.databases import Databases
+from appwrite.query import Query
+from appwrite.exception import AppwriteException
+from dotenv import load_dotenv
+
+
+# ---------- Environment Variables ----------
+load_dotenv()
+
+
+# ---------- Appwrite Setup ----------
+appwrite_client = Client()
+appwrite_client.set_endpoint(os.environ["APPWRITE_ENDPOINT"])
+appwrite_client.set_project(os.environ["APPWRITE_PROJECT_ID"])
+appwrite_client.set_key(os.environ["APPWRITE_API_KEY"])
+
+databases = Databases(appwrite_client)
+DATABASE_ID = os.environ["APPWRITE_DATABASE_ID"]
+COLLECTION_ID = os.environ["APPWRITE_COLLECTION_ID"]
+
+print("✅ Appwrite client initialized.")
 
 # ---------- FastAPI Setup ----------
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -78,6 +97,15 @@ class PaginatedRecipeResponse(BaseModel):
 
 class ProcedureResponse(BaseModel):
     steps: List[str]
+
+class SaveRequest(BaseModel):
+    user_id: str  # Clerk user ID
+    recipe_id: int
+
+class UnsaveRequest(BaseModel):
+    user_id: str
+    recipe_id: int
+
 
 # ---------- Image Fetch Utility ----------
 async def fetch_duckduckgo_image_url(query: str) -> str:
@@ -212,3 +240,142 @@ async def get_procedure(recipe_id: int):
     except Exception as e:
         print(f"[ERROR] Failed to get procedure for ID {recipe_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/save-recipe")
+async def save_recipe(data: SaveRequest):
+    """
+    Saves a recipe. Relies on a database-level unique index on (userId, recipeId)
+    to prevent duplicates. This is the most efficient and reliable method.
+    """
+    try:
+        # This single call attempts to create the document.
+        # If the (userId, recipeId) pair already exists, Appwrite will
+        # reject this request and the `except` block below will execute.
+        response = databases.create_document(
+            database_id=DATABASE_ID,
+            collection_id=COLLECTION_ID,
+            document_id="unique()",
+            data={
+                "userId": data.user_id,
+                "recipeId": data.recipe_id
+            }
+        )
+        # This part only runs if the creation was successful (i.e., no duplicate was found).
+        return {"message": "Recipe saved successfully!", "document_id": response['$id']}
+
+    except AppwriteException as e:
+        # The Appwrite SDK converts HTTP status codes into error codes.
+        # A 409 Conflict error from the server is caught here.
+        if e.code == 409:
+            # This block runs ONLY when the unique index constraint is violated.
+            print(f"Duplicate save attempt by User {data.user_id} for Recipe {data.recipe_id}.")
+            return {"message": "Recipe is already in your saved list."}
+        
+        # If the error was something else (e.g., server down, permissions error),
+        # it will be caught here and raised as a 500 error.
+        print(f"[ERROR] An unexpected Appwrite error occurred while saving recipe: {e}")
+        raise HTTPException(status_code=500, detail="Could not save recipe due to a server error.")
+
+
+@app.get("/saved-recipes/{user_id}", response_model=List[RecipeResponse])
+async def get_saved_recipes(user_id: str):
+    """
+    Fetches the full recipe data for all recipes a user has saved.
+    Simplified version that assumes no duplicate entries exist.
+    """
+    try:
+        response = databases.list_documents(
+            database_id=DATABASE_ID,
+            collection_id=COLLECTION_ID,
+            queries=[Query.equal("userId", user_id), Query.limit(500)]
+        )
+
+        saved_ids = [doc['recipeId'] for doc in response['documents']]
+
+        if not saved_ids:
+            return []
+
+        saved_recipes_df = model_df.loc[model_df.index.isin(saved_ids)]
+
+        if saved_recipes_df.empty:
+            return []
+        
+        # The rest of the image fetching logic remains the same
+        recipes_to_process = []
+        image_tasks = []
+        recipes_needing_image = []
+
+        for idx, row in saved_recipes_df.iterrows():
+            if idx not in saved_ids:
+                continue
+            base_recipe = { "id": idx, **row.to_dict() }
+            existing_image_url = row.get("image-url")
+            if pd.notna(existing_image_url) and "http" in str(existing_image_url):
+                base_recipe["image"] = existing_image_url
+                recipes_to_process.append(base_recipe)
+            else:
+                image_tasks.append(fetch_duckduckgo_image_url(row["RecipeName"]))
+                recipes_needing_image.append(base_recipe)
+        
+        if image_tasks:
+            new_image_urls = await asyncio.gather(*image_tasks)
+            for recipe_info, new_url in zip(recipes_needing_image, new_image_urls):
+                recipe_info["image"] = new_url
+                if 'image-url' not in model_df.columns:
+                    model_df['image-url'] = pd.Series(dtype='object')
+                model_df.loc[recipe_info["id"], "image-url"] = new_url
+            recipes_to_process.extend(recipes_needing_image)
+        
+        recipe_map = {recipe['id']: recipe for recipe in recipes_to_process}
+        # Build the final list in the original order
+        final_recipes_data = [recipe_map[rid] for rid in saved_ids if rid in recipe_map]
+        return [RecipeResponse(**recipe) for recipe in final_recipes_data]
+
+    except AppwriteException as e:
+        print(f"[ERROR] Failed to fetch saved recipes for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch saved recipes")
+
+@app.post("/unsave-recipe")
+async def unsave_recipe(data: UnsaveRequest):
+    """
+    Finds and deletes a saved recipe document for a specific user and recipe.
+    """
+    try:
+        # 1. Find the document that matches both the user and recipe ID.
+        documents = databases.list_documents(
+            database_id=DATABASE_ID,
+            collection_id=COLLECTION_ID,
+            queries=[
+                Query.equal("userId", data.user_id),
+                Query.equal("recipeId", data.recipe_id),
+                Query.limit(1) # We only need one document to get its ID
+            ]
+        )
+
+        # 2. Check if a document was found.
+        if documents['total'] == 0:
+            # This can happen in rare cases, but it's good to handle.
+            # We don't raise an error, we just confirm it's not there.
+            print(f"No saved recipe found for user {data.user_id} and recipe {data.recipe_id} to unsave.")
+            return {"message": "Recipe was not saved."}
+
+        # 3. Get the unique document ID ($id) of the found document.
+        document_id_to_delete = documents['documents'][0]['$id']
+
+        # 4. Delete that specific document.
+        databases.delete_document(
+            database_id=DATABASE_ID,
+            collection_id=COLLECTION_ID,
+            document_id=document_id_to_delete
+        )
+
+        return {"message": "Recipe unsaved successfully."}
+
+    except AppwriteException as e:
+        print(f"[ERROR] Failed to unsave recipe for user {data.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to unsave recipe.")
+
+
+
+
+
